@@ -21,6 +21,9 @@ This sample UI runs on `localhost:3001`, but `PROJEX_API_URL` should point to th
 ProjeX app/API origin, which is typically `http://localhost:3000` in local
 development.
 
+The checked-in example configuration only documents `http://localhost:3000` as the
+local ProjeX API origin.
+
 ## What this shows
 
 1. **Auth** — `Authorization: Bearer pjx_live_…` (key never reaches the browser).
