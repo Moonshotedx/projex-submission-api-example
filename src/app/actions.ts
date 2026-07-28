@@ -36,38 +36,66 @@ export async function getConfigStatus() {
   return { configured, baseUrl };
 }
 
+const PAGE_LIMIT = 25;
+
+/** One page of results from a list endpoint. */
+export type Page<T> = { items: T[]; nextCursor: string | null };
+
+/**
+ * Fetch a single page. The public API pages every list with `?limit&cursor`
+ * and searches with `?q`; the UI drives that directly (server-side search +
+ * cursor "Load more") instead of fetching everything up front.
+ */
+async function fetchPage<T>(
+  path: string,
+  key: "cohorts" | "milestones" | "tasks",
+  query: Record<string, string | undefined> = {},
+): Promise<Page<T>> {
+  const page = await projexFetch<
+    Record<string, T[]> & { nextCursor: string | null }
+  >("GET", path, { query: { ...query, limit: String(PAGE_LIMIT) } });
+  return {
+    items: (page[key] as T[] | undefined) ?? [],
+    nextCursor: page.nextCursor ?? null,
+  };
+}
+
+type ListOpts = { q?: string; cursor?: string };
+
 /** Omit status (or pass undefined) to list every enrollment. */
 export async function listCohorts(
   status?: CohortStatus,
-): Promise<ActionResult<Cohort[]>> {
+  opts: ListOpts = {},
+): Promise<ActionResult<Page<Cohort>>> {
   try {
-    const data = await projexFetch<{ cohorts: Cohort[] }>("GET", "/cohorts", {
-      query: status ? { status } : undefined,
+    const data = await fetchPage<Cohort>("/cohorts", "cohorts", {
+      status,
+      q: opts.q,
+      cursor: opts.cursor,
     });
-    return { ok: true, data: data.cohorts };
+    return { ok: true, data };
   } catch (error) {
     return fail(error);
   }
 }
 
-export async function listAllCohorts(): Promise<ActionResult<Cohort[]>> {
-  try {
-    const data = await projexFetch<{ cohorts: Cohort[] }>("GET", "/cohorts");
-    return { ok: true, data: data.cohorts };
-  } catch (error) {
-    return fail(error);
-  }
+export async function listAllCohorts(
+  opts: ListOpts = {},
+): Promise<ActionResult<Page<Cohort>>> {
+  return listCohorts(undefined, opts);
 }
 
 export async function listCohortMilestones(
   cohortId: string,
-): Promise<ActionResult<Milestone[]>> {
+  opts: ListOpts = {},
+): Promise<ActionResult<Page<Milestone>>> {
   try {
-    const data = await projexFetch<{ milestones: Milestone[] }>(
-      "GET",
+    const data = await fetchPage<Milestone>(
       `/cohorts/${encodeURIComponent(cohortId)}/milestones`,
+      "milestones",
+      { q: opts.q, cursor: opts.cursor },
     );
-    return { ok: true, data: data.milestones };
+    return { ok: true, data };
   } catch (error) {
     return fail(error);
   }
@@ -75,15 +103,20 @@ export async function listCohortMilestones(
 
 export async function listCohortTasks(
   cohortId: string,
-  opts: { milestoneId?: string } = {},
-): Promise<ActionResult<Task[]>> {
+  opts: { milestoneId?: string; assignee?: "me" | "others" } & ListOpts = {},
+): Promise<ActionResult<Page<Task>>> {
   try {
-    const data = await projexFetch<{ tasks: Task[] }>(
-      "GET",
+    const data = await fetchPage<Task>(
       `/cohorts/${encodeURIComponent(cohortId)}/tasks`,
-      { query: { milestoneId: opts.milestoneId } },
+      "tasks",
+      {
+        milestoneId: opts.milestoneId,
+        assignee: opts.assignee,
+        q: opts.q,
+        cursor: opts.cursor,
+      },
     );
-    return { ok: true, data: data.tasks };
+    return { ok: true, data };
   } catch (error) {
     return fail(error);
   }

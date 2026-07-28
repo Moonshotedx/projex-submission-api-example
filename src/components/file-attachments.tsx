@@ -20,9 +20,15 @@ type Props = {
   attachments: Attachment[];
   onChange: (next: Attachment[]) => void;
   disabled?: boolean;
+  required?: boolean;
 };
 
-export function FileAttachments({ attachments, onChange, disabled }: Props) {
+export function FileAttachments({
+  attachments,
+  onChange,
+  disabled,
+  required,
+}: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
 
@@ -60,6 +66,7 @@ export function FileAttachments({ attachments, onChange, disabled }: Props) {
         next.push({
           fileKey: slot.data.fileKey,
           fileName: file.name,
+          publicUrl: slot.data.publicUrl,
         });
         toast.success(`Uploaded ${file.name}`);
       }
@@ -76,7 +83,15 @@ export function FileAttachments({ attachments, onChange, disabled }: Props) {
 
   return (
     <Field className="min-w-0 overflow-hidden">
-      <FieldLabel>Attachments</FieldLabel>
+      <FieldLabel>
+        Attachments
+        {required ? (
+          <span className="text-destructive" aria-hidden>
+            {" "}
+            *
+          </span>
+        ) : null}
+      </FieldLabel>
       <div className="flex min-w-0 flex-col gap-3">
         <input
           ref={inputRef}

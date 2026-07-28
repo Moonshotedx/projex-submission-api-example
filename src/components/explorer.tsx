@@ -85,6 +85,9 @@ import type {
 import { getSubmitWindow } from "@/lib/submission-window";
 import { cn } from "@/lib/utils";
 import { FileAttachments } from "@/components/file-attachments";
+import { z } from "zod";
+
+const linkSchema = z.string().trim().url();
 
 type Target =
   | { kind: "milestone"; item: Milestone }
@@ -123,18 +126,29 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
   const [taskMilestoneFilter, setTaskMilestoneFilter] = useState<string>(
     () => searchParams?.get("milestone") ?? "all",
   );
+  const [assigneeScope, setAssigneeScope] = useState<"all" | "me" | "others">(
+    () => {
+      const value = searchParams?.get("assignee");
+      return value === "me" || value === "others" ? value : "all";
+    },
+  );
   const [tab, setTab] = useState<ItemTab>(() => {
     const value = searchParams?.get("tab");
     return value === "tasks" ? "tasks" : "milestones";
   });
   const [cohorts, setCohorts] = useState<Cohort[]>([]);
+  const [cohortsCursor, setCohortsCursor] = useState<string | null>(null);
   const [selectedCohort, setSelectedCohort] = useState<Cohort | null>(null);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [milestonesCursor, setMilestonesCursor] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksCursor, setTasksCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [target, setTarget] = useState<Target | null>(null);
   const [title, setTitle] = useState("");
   const [submission, setSubmission] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [submitMode, setSubmitMode] = useState<"link" | "file">("link");
   const [dryRun, setDryRun] = useState(true);
   const [lastResult, setLastResult] = useState<ActionResult<unknown> | null>(
     null,
@@ -168,30 +182,42 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     router.replace(qs ? `${nextPath}?${qs}` : nextPath, { scroll: false });
   }
 
-  async function loadCohorts(nextStatus: StatusFilter = statusFilter) {
-    setLoadingCohorts(true);
+  async function loadCohorts(
+    nextStatus: StatusFilter = statusFilter,
+    opts: { cursor?: string; q?: string } = {},
+  ) {
+    const append = Boolean(opts.cursor);
+    if (append) setLoadingMore(true);
+    else setLoadingCohorts(true);
     try {
+      const effectiveStatus = routeCohortId ? "all" : nextStatus;
       const status = await getConfigStatus();
       setConfigured(status.configured);
       setBaseUrl(status.baseUrl);
 
       if (!status.configured) {
         setCohorts([]);
+        setCohortsCursor(null);
         return;
       }
 
+      const q = opts.q ?? (cohortQuery.trim() || undefined);
       const result =
-        nextStatus === "all"
-          ? await listAllCohorts()
-          : await listCohorts(nextStatus);
+        effectiveStatus === "all"
+          ? await listAllCohorts({ q, cursor: opts.cursor })
+          : await listCohorts(effectiveStatus, { q, cursor: opts.cursor });
       if (!result.ok) {
         toast.error(result.message, { description: result.code });
-        setCohorts([]);
+        if (!append) setCohorts([]);
         return;
       }
-      setCohorts(result.data);
+      setCohorts((prev) =>
+        append ? [...prev, ...result.data.items] : result.data.items,
+      );
+      setCohortsCursor(result.data.nextCursor);
     } finally {
       setLoadingCohorts(false);
+      setLoadingMore(false);
     }
   }
 
@@ -200,11 +226,23 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter]);
 
+  // Debounced server-side search for cohorts (reloads page 1).
+  useEffect(() => {
+    if (routeCohortId) return;
+    const handle = setTimeout(() => {
+      void loadCohorts(statusFilter, { q: cohortQuery.trim() || undefined });
+    }, 300);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cohortQuery]);
+
+  // Sync only the discrete controls (status / tab / milestone filter) from the
+  // URL. The free-text search inputs are owned by local state — seeded from the
+  // URL on mount (via the useState initializers) and written back on change.
+  // Reading them back here races the async router.replace and drops keystrokes.
   useEffect(() => {
     if (!searchParams) return;
     const nextStatus = searchParams.get("status");
-    const nextQ = searchParams.get("q") ?? "";
-    const nextItemQ = searchParams.get("itemQ") ?? "";
     const nextMilestone = searchParams.get("milestone") ?? "all";
     const nextTab = searchParams.get("tab") === "tasks" ? "tasks" : "milestones";
 
@@ -219,19 +257,9 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
           : "live";
 
     if (safeStatus !== statusFilter) setStatusFilter(safeStatus);
-    if (nextQ !== cohortQuery) setCohortQuery(nextQ);
-    if (nextItemQ !== itemQuery) setItemQuery(nextItemQ);
     if (nextMilestone !== taskMilestoneFilter) setTaskMilestoneFilter(nextMilestone);
     if (nextTab !== tab) setTab(nextTab);
-  }, [
-    cohortQuery,
-    itemQuery,
-    routeCohortId,
-    searchParams,
-    statusFilter,
-    tab,
-    taskMilestoneFilter,
-  ]);
+  }, [routeCohortId, searchParams, statusFilter, tab, taskMilestoneFilter]);
 
   useEffect(() => {
     if (!routeCohortId) {
@@ -279,43 +307,11 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCohort, tasks, milestones, searchParams]);
 
-  const filteredCohorts = useMemo(() => {
-    const q = cohortQuery.trim().toLowerCase();
-    if (!q) return cohorts;
-    return cohorts.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.id.toLowerCase().includes(q) ||
-        (c.type?.toLowerCase().includes(q) ?? false),
-    );
-  }, [cohorts, cohortQuery]);
-
-  const filteredMilestones = useMemo(() => {
-    const q = itemQuery.trim().toLowerCase();
-    if (!q) return milestones;
-    return milestones.filter(
-      (m) =>
-        m.title.toLowerCase().includes(q) ||
-        (m.ref?.toLowerCase().includes(q) ?? false) ||
-        m.id.toLowerCase().includes(q),
-    );
-  }, [milestones, itemQuery]);
-
-  const filteredTasks = useMemo(() => {
-    let list = tasks;
-    if (taskMilestoneFilter !== "all") {
-      list = list.filter((t) => t.milestoneId === taskMilestoneFilter);
-    }
-    const q = itemQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter(
-      (t) =>
-        t.title.toLowerCase().includes(q) ||
-        t.ref.toLowerCase().includes(q) ||
-        t.status.toLowerCase().includes(q) ||
-        t.id.toLowerCase().includes(q),
-    );
-  }, [tasks, itemQuery, taskMilestoneFilter]);
+  // Search + milestone filtering now happen server-side (`?q`, `?milestoneId`),
+  // so these are pass-throughs kept for the render's existing references.
+  const filteredCohorts = cohorts;
+  const filteredMilestones = milestones;
+  const filteredTasks = tasks;
   const taskMilestoneFilterLabel = useMemo(() => {
     if (taskMilestoneFilter === "all") {
       return "All milestones";
@@ -367,6 +363,9 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
       },
       { path: `/cohorts/${cohort.id}` },
     );
+    setAssigneeScope("all");
+    setMilestonesCursor(null);
+    setTasksCursor(null);
     setLoadingDetail(true);
     void (async () => {
       try {
@@ -377,17 +376,59 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
         if (!ms.ok) {
           toast.error(ms.message);
           setMilestones([]);
+          setMilestonesCursor(null);
         } else {
-          setMilestones(ms.data);
+          setMilestones(ms.data.items);
+          setMilestonesCursor(ms.data.nextCursor);
         }
         if (!ts.ok) {
           toast.error(ts.message);
           setTasks([]);
+          setTasksCursor(null);
         } else {
-          setTasks(ts.data);
+          setTasks(ts.data.items);
+          setTasksCursor(ts.data.nextCursor);
         }
       } finally {
         setLoadingDetail(false);
+      }
+    })();
+  }
+
+  // Reload the task list (page 1) with the current milestone + assignee + search
+  // filters — all applied server-side.
+  function reloadTasks(
+    cohortId: string,
+    over: { milestoneId?: string; assignee?: "me" | "others" } = {},
+  ) {
+    const milestoneId =
+      "milestoneId" in over
+        ? over.milestoneId
+        : taskMilestoneFilter === "all"
+          ? undefined
+          : taskMilestoneFilter;
+    const assignee =
+      "assignee" in over
+        ? over.assignee
+        : assigneeScope === "all"
+          ? undefined
+          : assigneeScope;
+    setLoadingTasks(true);
+    void (async () => {
+      try {
+        const result = await listCohortTasks(cohortId, {
+          milestoneId,
+          assignee,
+          q: itemQuery.trim() || undefined,
+        });
+        if (!result.ok) {
+          toast.error(result.message);
+          return;
+        }
+        setTasks(result.data.items);
+        setTasksCursor(result.data.nextCursor);
+      } finally {
+        setLoadingTasks(false);
       }
     })();
   }
@@ -397,22 +438,93 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     setTaskMilestoneFilter(next);
     setUrlState({ milestone: next });
     if (!selectedCohort) return;
-    setLoadingTasks(true);
+    reloadTasks(selectedCohort.id, {
+      milestoneId: next === "all" ? undefined : next,
+    });
+  }
+
+  function onAssigneeScopeChange(next: "all" | "me" | "others") {
+    setAssigneeScope(next);
+    setUrlState({ assignee: next === "all" ? null : next });
+    if (!selectedCohort) return;
+    reloadTasks(selectedCohort.id, {
+      assignee: next === "all" ? undefined : next,
+    });
+  }
+
+  function loadMoreCohorts() {
+    if (!cohortsCursor) return;
+    void loadCohorts(statusFilter, {
+      cursor: cohortsCursor,
+      q: cohortQuery.trim() || undefined,
+    });
+  }
+
+  function loadMoreMilestones() {
+    if (!selectedCohort || !milestonesCursor) return;
+    setLoadingMore(true);
+    const cohortId = selectedCohort.id;
     void (async () => {
       try {
-        const result = await listCohortTasks(selectedCohort.id, {
-          milestoneId: next === "all" ? undefined : next,
+        const r = await listCohortMilestones(cohortId, {
+          q: itemQuery.trim() || undefined,
+          cursor: milestonesCursor,
         });
-        if (!result.ok) {
-          toast.error(result.message);
-          return;
+        if (r.ok) {
+          setMilestones((prev) => [...prev, ...r.data.items]);
+          setMilestonesCursor(r.data.nextCursor);
+        } else {
+          toast.error(r.message);
         }
-        setTasks(result.data);
       } finally {
-        setLoadingTasks(false);
+        setLoadingMore(false);
       }
     })();
   }
+
+  function loadMoreTasks() {
+    if (!selectedCohort || !tasksCursor) return;
+    setLoadingMore(true);
+    const cohortId = selectedCohort.id;
+    void (async () => {
+      try {
+        const r = await listCohortTasks(cohortId, {
+          milestoneId:
+            taskMilestoneFilter === "all" ? undefined : taskMilestoneFilter,
+          assignee: assigneeScope === "all" ? undefined : assigneeScope,
+          q: itemQuery.trim() || undefined,
+          cursor: tasksCursor,
+        });
+        if (r.ok) {
+          setTasks((prev) => [...prev, ...r.data.items]);
+          setTasksCursor(r.data.nextCursor);
+        } else {
+          toast.error(r.message);
+        }
+      } finally {
+        setLoadingMore(false);
+      }
+    })();
+  }
+
+  // Debounced server-side search for milestones + tasks in the open cohort.
+  useEffect(() => {
+    if (!selectedCohort) return;
+    const cohortId = selectedCohort.id;
+    const handle = setTimeout(() => {
+      const q = itemQuery.trim() || undefined;
+      void (async () => {
+        const ms = await listCohortMilestones(cohortId, { q });
+        if (ms.ok) {
+          setMilestones(ms.data.items);
+          setMilestonesCursor(ms.data.nextCursor);
+        }
+      })();
+      reloadTasks(cohortId);
+    }, 300);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemQuery]);
 
   function pickTarget(next: Target) {
     setTarget(next);
@@ -462,6 +574,25 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
       return;
     }
 
+    // The projex API requires a single `submission` value (a URL). In "link"
+    // mode that's what the user typed; in "file" mode it's the uploaded file's
+    // public URL — so the user never has to paste a link and upload a file.
+    let effectiveSubmission: string;
+    if (submitMode === "link") {
+      const parsed = linkSchema.safeParse(submission);
+      if (!parsed.success) {
+        toast.error("Enter a valid URL (https://…)");
+        return;
+      }
+      effectiveSubmission = parsed.data;
+    } else {
+      effectiveSubmission = attachments[0]?.publicUrl ?? "";
+      if (!effectiveSubmission) {
+        toast.error("Upload a file to submit.");
+        return;
+      }
+    }
+
     setSubmitting(true);
     void (async () => {
       try {
@@ -481,7 +612,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
         const payload = {
           ref,
           title: title.trim() || `${target.kind} submission`,
-          submission: submission.trim(),
+          submission: effectiveSubmission,
           attachments: attachments.length ? attachments : undefined,
           dryRun,
           idempotencyKey: dryRun ? undefined : crypto.randomUUID(),
@@ -538,7 +669,11 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
   );
   const detailBusy = loadingDetail || loadingTasks || submitting;
   const realSubmitBlocked = submitWindow.blocked && !dryRun;
-  const submitDisabled = submitting || realSubmitBlocked;
+  const submitInvalid =
+    submitMode === "link"
+      ? !linkSchema.safeParse(submission).success
+      : attachments.length === 0;
+  const submitDisabled = submitting || realSubmitBlocked || submitInvalid;
   const cohortDetailQuery = useMemo(() => {
     const params = new URLSearchParams();
     if (statusFilter !== "live") params.set("status", statusFilter);
@@ -676,10 +811,12 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Showing {filteredCohorts.length} of {cohorts.length}
+              {cohorts.length} loaded
+              {cohortsCursor ? "+" : ""}
               {statusFilter === "all"
                 ? " (all statuses)"
                 : ` · status=${statusFilter}`}
+              {cohortQuery.trim() ? " · searching server-side" : ""}
             </p>
             <CohortList
               cohorts={filteredCohorts}
@@ -698,6 +835,22 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
               }
               getHref={(cohort) => `/cohorts/${cohort.id}${cohortDetailQuery}`}
             />
+            {cohortsCursor ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                disabled={loadingMore}
+                onClick={loadMoreCohorts}
+              >
+                {loadingMore ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <ArrowRightIcon data-icon="inline-start" />
+                )}
+                Load more
+              </Button>
+            ) : null}
           </div>
         ) : isResolvingRouteCohort ? (
           <div className="flex min-w-0 flex-col gap-4">
@@ -756,7 +909,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
             </Button>
 
             <div className="grid min-w-0 items-stretch gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] lg:items-start">
-              <Card className="flex max-h-[min(720px,calc(100svh-11rem))] min-h-0 min-w-0 flex-col overflow-hidden shadow-sm">
+              <Card className="flex h-[min(720px,calc(100svh-11rem))] min-h-0 min-w-0 flex-col overflow-hidden shadow-sm">
                 <CardHeader className="shrink-0 overflow-hidden border-b bg-card">
                   <div className="flex min-w-0 items-start justify-between gap-3">
                     <div className="flex min-w-0 flex-1 flex-col gap-1 overflow-hidden">
@@ -832,8 +985,8 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                               onValueChange={onTaskMilestoneFilterChange}
                               disabled={detailBusy}
                             >
-                              <SelectTrigger className="w-full sm:w-52">
-                                <span className="truncate">
+                              <SelectTrigger className="w-full min-w-0 sm:w-52">
+                                <span className="min-w-0 flex-1 truncate text-left">
                                   {taskMilestoneFilterLabel}
                                 </span>
                               </SelectTrigger>
@@ -852,6 +1005,36 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                             </Select>
                           ) : null}
                         </div>
+                        {tab === "tasks" ? (
+                          <ToggleGroup
+                            value={[assigneeScope]}
+                            onValueChange={(values: string[]) => {
+                              const next = values[0];
+                              if (
+                                next === "all" ||
+                                next === "me" ||
+                                next === "others"
+                              ) {
+                                onAssigneeScopeChange(next);
+                              }
+                            }}
+                            variant="outline"
+                            size="sm"
+                            disabled={detailBusy}
+                            className="flex-wrap"
+                            aria-label="Task assignee"
+                          >
+                            <ToggleGroupItem value="all">
+                              All team tasks
+                            </ToggleGroupItem>
+                            <ToggleGroupItem value="me">
+                              Assigned to me
+                            </ToggleGroupItem>
+                            <ToggleGroupItem value="others">
+                              Assigned to others
+                            </ToggleGroupItem>
+                          </ToggleGroup>
+                        ) : null}
                         {tab === "tasks" && loadingTasks ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Spinner className="size-3" />
@@ -861,7 +1044,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                       </div>
                       <TabsContent
                         value="milestones"
-                        className="mt-0 min-h-0 min-w-0 flex-1 overflow-hidden pt-4 data-[state=inactive]:hidden"
+                        className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-4 data-[state=inactive]:hidden"
                       >
                         <ItemList
                           disabled={detailBusy}
@@ -881,10 +1064,24 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                               pickTarget({ kind: "milestone", item: m }),
                           }))}
                         />
+                        {milestonesCursor ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-3 w-full shrink-0"
+                            disabled={loadingMore}
+                            onClick={loadMoreMilestones}
+                          >
+                            {loadingMore ? (
+                              <Spinner data-icon="inline-start" />
+                            ) : null}
+                            Load more
+                          </Button>
+                        ) : null}
                       </TabsContent>
                       <TabsContent
                         value="tasks"
-                        className="mt-0 min-h-0 min-w-0 flex-1 overflow-hidden pt-4 data-[state=inactive]:hidden"
+                        className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-4 data-[state=inactive]:hidden"
                       >
                         <ItemList
                           disabled={detailBusy}
@@ -902,6 +1099,20 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                               pickTarget({ kind: "task", item: t }),
                           }))}
                         />
+                        {tasksCursor ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-3 w-full shrink-0"
+                            disabled={loadingMore}
+                            onClick={loadMoreTasks}
+                          >
+                            {loadingMore ? (
+                              <Spinner data-icon="inline-start" />
+                            ) : null}
+                            Load more
+                          </Button>
+                        ) : null}
                       </TabsContent>
                     </Tabs>
                   )}
@@ -966,25 +1177,65 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                           />
                         </Field>
                         <Field className="min-w-0 overflow-hidden">
-                          <FieldLabel htmlFor="body">
-                            What are you submitting?
-                          </FieldLabel>
-                          <Textarea
-                            id="body"
-                            value={submission}
-                            onChange={(e) => setSubmission(e.target.value)}
+                          <FieldLabel>What are you submitting?</FieldLabel>
+                          <ToggleGroup
+                            value={[submitMode]}
+                            onValueChange={(values: string[]) => {
+                              const next = values[0];
+                              if (next === "link" || next === "file") {
+                                setSubmitMode(next);
+                              }
+                            }}
+                            variant="outline"
+                            size="sm"
                             disabled={submitting}
-                            placeholder="Paste a PR link, demo URL, or a short write-up…"
-                            rows={5}
-                            required
-                            className="max-h-40 min-h-28 resize-y break-words"
-                          />
+                            className="w-full"
+                          >
+                            <ToggleGroupItem value="link" className="flex-1">
+                              Paste a link
+                            </ToggleGroupItem>
+                            <ToggleGroupItem value="file" className="flex-1">
+                              Upload a file
+                            </ToggleGroupItem>
+                          </ToggleGroup>
+                          <FieldDescription>
+                            A submission is one URL. Paste a link, or upload a
+                            file and its URL becomes the submission.
+                          </FieldDescription>
                         </Field>
-                        <FileAttachments
-                          attachments={attachments}
-                          onChange={setAttachments}
-                          disabled={submitting}
-                        />
+
+                        {submitMode === "link" ? (
+                          <Field className="min-w-0 overflow-hidden">
+                            <FieldLabel htmlFor="body">Link</FieldLabel>
+                            <Input
+                              id="body"
+                              type="url"
+                              inputMode="url"
+                              value={submission}
+                              onChange={(e) => setSubmission(e.target.value)}
+                              disabled={submitting}
+                              placeholder="https://github.com/you/repo/pull/12"
+                              className="min-w-0"
+                            />
+                            <FieldDescription>
+                              A PR, demo, or doc URL. Must be a valid link.
+                            </FieldDescription>
+                          </Field>
+                        ) : (
+                          <>
+                            <FileAttachments
+                              attachments={attachments}
+                              onChange={setAttachments}
+                              disabled={submitting}
+                              required
+                            />
+                            {attachments.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">
+                                Upload a file — its URL becomes your submission.
+                              </p>
+                            ) : null}
+                          </>
+                        )}
                         {submitWindow.blocked ? (
                           <Alert className="border-amber-500/30 bg-amber-500/5">
                             <CircleAlertIcon />
@@ -1239,9 +1490,9 @@ function ItemList({
   }
 
   return (
-    <div className="relative h-full min-h-0 min-w-0">
-      <ScrollArea className="h-full min-h-[240px] w-full">
-        <ul className="flex flex-col gap-2 pr-3 pb-6">
+    <div className="relative min-h-0 flex-1 overflow-hidden">
+      <div className="absolute inset-0 overflow-y-auto overscroll-contain pr-1">
+        <ul className="flex flex-col gap-2 pb-6">
           {items.map((item) => (
             <li key={item.key} className="min-w-0">
               <button
@@ -1290,11 +1541,11 @@ function ItemList({
             </li>
           ))}
         </ul>
-      </ScrollArea>
+      </div>
       {items.length > 4 ? (
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-card via-card/80 to-transparent"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-10 bg-gradient-to-t from-card via-card/80 to-transparent"
         />
       ) : null}
     </div>

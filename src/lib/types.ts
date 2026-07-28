@@ -38,11 +38,14 @@ export interface Task {
 export interface Attachment {
   fileKey: string;
   fileName?: string;
+  /** Public URL of the uploaded file — used as the submission when uploading. */
+  publicUrl?: string;
 }
 
 export interface UploadSlot {
   uploadUrl: string;
   fileKey: string;
+  publicUrl: string;
   expiresIn: number;
 }
 
