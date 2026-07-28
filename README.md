@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ProjeX Submission API — fetch example
 
-## Getting Started
+Minimal Next.js app that walks the submission flow over the public REST API
+(`GET /api/v1/cohorts` → milestones/tasks → `POST …/submissions`) using plain
+`fetch` in Server Actions. No SDK.
 
-First, run the development server:
+## Setup
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+cp .env.example .env.local
+# paste PROJEX_API_KEY from Account → API keys
+# for a local ProjeX app/API, set PROJEX_API_URL=http://localhost:3000
+
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3001](http://localhost:3001).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+This sample UI runs on `localhost:3001`, but `PROJEX_API_URL` should point to the
+ProjeX app/API origin, which is typically `http://localhost:3000` in local
+development.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## What this shows
 
-## Learn More
+1. **Auth** — `Authorization: Bearer pjx_live_…` (key never reaches the browser).
+2. **Discovery** — live cohorts, then milestones/tasks with ready-to-use `ref`s.
+3. **Submit** — `POST /milestones/{ref}/submissions` or `/tasks/{ref}/submissions`.
+4. **Files** — `POST /uploads` → browser `PUT` to the presigned URL → pass `attachments[{ fileKey }]` on submit.
+5. **Dry-run** — `?dryRun=true` validates the window without writing.
 
-To learn more about Next.js, take a look at the following resources:
+Core client: [`src/lib/projex-api.ts`](src/lib/projex-api.ts).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Without the UI:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+export PROJEX_API_KEY=pjx_live_…
+./scripts/list-cohorts.sh
+```
 
-## Deploy on Vercel
+## Curl equivalent
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+export PROJEX_API_URL="https://projex.xcelerator.in"
+export PROJEX_API_KEY="pjx_live_…"
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+curl -sS "$PROJEX_API_URL/api/v1/cohorts?status=live" \
+  -H "Authorization: Bearer $PROJEX_API_KEY" | jq
+
+# then, with a ref from the milestones list:
+curl -sS -X POST "$PROJEX_API_URL/api/v1/milestones/T12M3/submissions?dryRun=true" \
+  -H "Authorization: Bearer $PROJEX_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Sprint build","submission":"https://github.com/me/proj/pull/12"}' | jq
+```
+
+## Prefer typed clients?
+
+See the sibling repo [`projex-submission-sdk-example`](../projex-submission-sdk-example)
+which does the same flow with `@pkg-projex/sdk`.
