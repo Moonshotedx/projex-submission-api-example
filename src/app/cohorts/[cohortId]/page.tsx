@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Explorer } from "@/components/explorer";
 
 export default async function CohortPage({
@@ -7,5 +8,9 @@ export default async function CohortPage({
 }) {
   const { cohortId } = await params;
 
-  return <Explorer routeCohortId={cohortId} />;
+  return (
+    <Suspense fallback={null}>
+      <Explorer routeCohortId={cohortId} />
+    </Suspense>
+  );
 }

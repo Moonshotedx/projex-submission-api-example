@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import { Explorer } from "@/components/explorer";
 
 export default function HomePage() {
-  return <Explorer />;
+  return (
+    <Suspense fallback={null}>
+      <Explorer />
+    </Suspense>
+  );
 }
