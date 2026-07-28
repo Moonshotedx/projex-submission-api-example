@@ -50,6 +50,15 @@ export async function listCohorts(
   }
 }
 
+export async function listAllCohorts(): Promise<ActionResult<Cohort[]>> {
+  try {
+    const data = await projexFetch<{ cohorts: Cohort[] }>("GET", "/cohorts");
+    return { ok: true, data: data.cohorts };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
 export async function listCohortMilestones(
   cohortId: string,
 ): Promise<ActionResult<Milestone[]>> {

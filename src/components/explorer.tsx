@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
@@ -21,6 +21,7 @@ import {
 
 import {
   getConfigStatus,
+  listAllCohorts,
   listCohortMilestones,
   listCohortTasks,
   listCohorts,
@@ -60,7 +61,6 @@ import {
   SelectGroup,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -139,8 +139,10 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
   const [lastResult, setLastResult] = useState<ActionResult<unknown> | null>(
     null,
   );
-  const [pending, startTransition] = useTransition();
+  const [loadingCohorts, setLoadingCohorts] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   function setUrlState(
     updates: Record<string, string | null | undefined>,
@@ -148,7 +150,14 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
   ) {
     const params = new URLSearchParams(searchParams?.toString() ?? "");
     for (const [key, value] of Object.entries(updates)) {
-      if (!value || value === "all" || value === "milestones") {
+      const shouldDelete =
+        value == null ||
+        value === "" ||
+        (key === "status" && value === "all") ||
+        (key === "milestone" && value === "all") ||
+        (key === "tab" && value === "milestones");
+
+      if (shouldDelete) {
         params.delete(key);
       } else {
         params.set(key, value);
@@ -159,8 +168,9 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     router.replace(qs ? `${nextPath}?${qs}` : nextPath, { scroll: false });
   }
 
-  function loadCohorts(nextStatus: StatusFilter = statusFilter) {
-    startTransition(async () => {
+  async function loadCohorts(nextStatus: StatusFilter = statusFilter) {
+    setLoadingCohorts(true);
+    try {
       const status = await getConfigStatus();
       setConfigured(status.configured);
       setBaseUrl(status.baseUrl);
@@ -170,20 +180,23 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
         return;
       }
 
-      const result = await listCohorts(
-        nextStatus === "all" ? undefined : nextStatus,
-      );
+      const result =
+        nextStatus === "all"
+          ? await listAllCohorts()
+          : await listCohorts(nextStatus);
       if (!result.ok) {
         toast.error(result.message, { description: result.code });
         setCohorts([]);
         return;
       }
       setCohorts(result.data);
-    });
+    } finally {
+      setLoadingCohorts(false);
+    }
   }
 
   useEffect(() => {
-    loadCohorts(statusFilter);
+    void loadCohorts(statusFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter]);
 
@@ -303,6 +316,16 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
         t.id.toLowerCase().includes(q),
     );
   }, [tasks, itemQuery, taskMilestoneFilter]);
+  const taskMilestoneFilterLabel = useMemo(() => {
+    if (taskMilestoneFilter === "all") {
+      return "All milestones";
+    }
+
+    return (
+      milestones.find((milestone) => milestone.id === taskMilestoneFilter)?.title ??
+      "Selected milestone"
+    );
+  }, [milestones, taskMilestoneFilter]);
 
   function onStatusFilterChange(values: string[]) {
     const next = (values[0] as StatusFilter | undefined) ?? statusFilter;
@@ -345,7 +368,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
       { path: `/cohorts/${cohort.id}` },
     );
     setLoadingDetail(true);
-    startTransition(async () => {
+    void (async () => {
       try {
         const [ms, ts] = await Promise.all([
           listCohortMilestones(cohort.id),
@@ -366,7 +389,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
       } finally {
         setLoadingDetail(false);
       }
-    });
+    })();
   }
 
   function onTaskMilestoneFilterChange(value: string | null) {
@@ -374,16 +397,21 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     setTaskMilestoneFilter(next);
     setUrlState({ milestone: next });
     if (!selectedCohort) return;
-    startTransition(async () => {
-      const result = await listCohortTasks(selectedCohort.id, {
-        milestoneId: next === "all" ? undefined : next,
-      });
-      if (!result.ok) {
-        toast.error(result.message);
-        return;
+    setLoadingTasks(true);
+    void (async () => {
+      try {
+        const result = await listCohortTasks(selectedCohort.id, {
+          milestoneId: next === "all" ? undefined : next,
+        });
+        if (!result.ok) {
+          toast.error(result.message);
+          return;
+        }
+        setTasks(result.data);
+      } finally {
+        setLoadingTasks(false);
       }
-      setTasks(result.data);
-    });
+    })();
   }
 
   function pickTarget(next: Target) {
@@ -434,41 +462,46 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
       return;
     }
 
-    startTransition(async () => {
-      if (!dryRun) {
-        const window = getSubmitWindow({
-          cohort: selectedCohort,
-          target,
-        });
-        if (window.blocked) {
-          toast.error("Submission window is closed", {
-            description: window.reason ?? undefined,
+    setSubmitting(true);
+    void (async () => {
+      try {
+        if (!dryRun) {
+          const window = getSubmitWindow({
+            cohort: selectedCohort,
+            target,
           });
-          return;
+          if (window.blocked) {
+            toast.error("Submission window is closed", {
+              description: window.reason ?? undefined,
+            });
+            return;
+          }
         }
+
+        const payload = {
+          ref,
+          title: title.trim() || `${target.kind} submission`,
+          submission: submission.trim(),
+          attachments: attachments.length ? attachments : undefined,
+          dryRun,
+          idempotencyKey: dryRun ? undefined : crypto.randomUUID(),
+        };
+
+        const result =
+          target.kind === "milestone"
+            ? await submitMilestone(payload)
+            : await submitTask(payload);
+
+        setLastResult(result);
+        if (result.ok) {
+          toast.success(dryRun ? "Looks good — dry-run passed" : "Submitted");
+        } else {
+          toast.error(result.message, { description: result.code });
+        }
+      } finally {
+        setSubmitting(false);
       }
-
-      const payload = {
-        ref,
-        title: title.trim() || `${target.kind} submission`,
-        submission: submission.trim(),
-        attachments: attachments.length ? attachments : undefined,
-        dryRun,
-        idempotencyKey: dryRun ? undefined : crypto.randomUUID(),
-      };
-
-      const result =
-        target.kind === "milestone"
-          ? await submitMilestone(payload)
-          : await submitTask(payload);
-
-      setLastResult(result);
-      if (result.ok) {
-        toast.success(dryRun ? "Looks good — dry-run passed" : "Submitted");
-      } else {
-        toast.error(result.message, { description: result.code });
-      }
-    });
+    })();
   }
 
   const isDetailRoute = Boolean(routeCohortId);
@@ -477,9 +510,16 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     : null;
   const needsRouteSelection =
     isDetailRoute && (!selectedCohort || selectedCohort.id !== routeCohortId);
+  const isHydratingRouteSelection =
+    needsRouteSelection && Boolean(routeCohortMatch);
   const isResolvingRouteCohort =
-    needsRouteSelection &&
-    (configured === null || pending || loadingDetail || cohorts.length === 0);
+    (needsRouteSelection &&
+      (configured === null ||
+        loadingCohorts ||
+        loadingDetail ||
+        cohorts.length === 0 ||
+        isHydratingRouteSelection)) ||
+    (isDetailRoute && selectedCohort?.id === routeCohortId && loadingDetail);
   const routeCohortMissing =
     needsRouteSelection &&
     !isResolvingRouteCohort &&
@@ -496,8 +536,9 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
     () => getSubmitWindow({ cohort: selectedCohort, target }),
     [selectedCohort, target],
   );
+  const detailBusy = loadingDetail || loadingTasks || submitting;
   const realSubmitBlocked = submitWindow.blocked && !dryRun;
-  const submitDisabled = pending || realSubmitBlocked;
+  const submitDisabled = submitting || realSubmitBlocked;
   const cohortDetailQuery = useMemo(() => {
     const params = new URLSearchParams();
     if (statusFilter !== "live") params.set("status", statusFilter);
@@ -543,9 +584,9 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
               variant="outline"
               size="sm"
               onClick={() => loadCohorts()}
-              disabled={pending}
+              disabled={loadingCohorts}
             >
-              {pending ? (
+              {loadingCohorts ? (
                 <Spinner data-icon="inline-start" />
               ) : (
                 <RefreshCwIcon data-icon="inline-start" />
@@ -642,7 +683,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
             </p>
             <CohortList
               cohorts={filteredCohorts}
-              loading={pending && cohorts.length === 0 && configured !== false}
+              loading={loadingCohorts && cohorts.length === 0 && configured !== false}
               emptyTitle={
                 cohortQuery.trim()
                   ? "No cohorts match your search"
@@ -743,6 +784,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                     <Tabs
                       value={tab}
                       onValueChange={(value) => {
+                        if (detailBusy) return;
                         const next = value === "tasks" ? "tasks" : "milestones";
                         setTab(next);
                         setUrlState({ tab: next });
@@ -752,14 +794,14 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                       <div className="flex min-w-0 shrink-0 flex-col gap-3">
                         <div className="min-w-0 overflow-x-auto">
                           <TabsList className="h-auto w-max max-w-full">
-                            <TabsTrigger value="milestones">
+                            <TabsTrigger value="milestones" disabled={detailBusy}>
                               <ClipboardListIcon data-icon="inline-start" />
                               Milestones
                               <Badge variant="outline" className="ml-1 shrink-0">
                                 {filteredMilestones.length}
                               </Badge>
                             </TabsTrigger>
-                            <TabsTrigger value="tasks">
+                            <TabsTrigger value="tasks" disabled={detailBusy}>
                               <ListTodoIcon data-icon="inline-start" />
                               Tasks
                               <Badge variant="outline" className="ml-1 shrink-0">
@@ -778,38 +820,51 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                                 setItemQuery(value);
                                 setUrlState({ itemQ: value || null });
                               }}
+                              disabled={detailBusy}
                               placeholder="Filter by title or ref…"
                               className="pl-8"
                               aria-label="Filter items"
                             />
                           </div>
-                          <Select
-                            value={taskMilestoneFilter}
-                            onValueChange={onTaskMilestoneFilterChange}
-                          >
-                            <SelectTrigger className="w-full sm:w-52">
-                              <SelectValue placeholder="All milestones" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectGroup>
-                                <SelectItem value="all">
-                                  All milestones
-                                </SelectItem>
-                                {milestones.map((m) => (
-                                  <SelectItem key={m.id} value={m.id}>
-                                    {m.title}
+                          {tab === "tasks" ? (
+                            <Select
+                              value={taskMilestoneFilter}
+                              onValueChange={onTaskMilestoneFilterChange}
+                              disabled={detailBusy}
+                            >
+                              <SelectTrigger className="w-full sm:w-52">
+                                <span className="truncate">
+                                  {taskMilestoneFilterLabel}
+                                </span>
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectGroup>
+                                  <SelectItem value="all">
+                                    All milestones
                                   </SelectItem>
-                                ))}
-                              </SelectGroup>
-                            </SelectContent>
-                          </Select>
+                                  {milestones.map((m) => (
+                                    <SelectItem key={m.id} value={m.id}>
+                                      {m.title}
+                                    </SelectItem>
+                                  ))}
+                                </SelectGroup>
+                              </SelectContent>
+                            </Select>
+                          ) : null}
                         </div>
+                        {tab === "tasks" && loadingTasks ? (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Spinner className="size-3" />
+                            Updating tasks…
+                          </div>
+                        ) : null}
                       </div>
                       <TabsContent
                         value="milestones"
                         className="mt-0 min-h-0 min-w-0 flex-1 overflow-hidden pt-4 data-[state=inactive]:hidden"
                       >
                         <ItemList
+                          disabled={detailBusy}
                           emptyTitle="No milestones match"
                           emptyDescription="Try clearing the search, or this cohort has no milestones for your key."
                           items={filteredMilestones.map((m) => ({
@@ -832,6 +887,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                         className="mt-0 min-h-0 min-w-0 flex-1 overflow-hidden pt-4 data-[state=inactive]:hidden"
                       >
                         <ItemList
+                          disabled={detailBusy}
                           emptyTitle="No tasks match"
                           emptyDescription="Try another milestone filter or clear the search."
                           items={filteredTasks.map((t) => ({
@@ -903,6 +959,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                             id="title"
                             value={title}
                             onChange={(e) => setTitle(e.target.value)}
+                            disabled={submitting}
                             placeholder="e.g. Sprint 2 build"
                             required
                             className="min-w-0"
@@ -916,6 +973,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                             id="body"
                             value={submission}
                             onChange={(e) => setSubmission(e.target.value)}
+                            disabled={submitting}
                             placeholder="Paste a PR link, demo URL, or a short write-up…"
                             rows={5}
                             required
@@ -925,7 +983,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                         <FileAttachments
                           attachments={attachments}
                           onChange={setAttachments}
-                          disabled={pending}
+                          disabled={submitting}
                         />
                         {submitWindow.blocked ? (
                           <Alert className="border-amber-500/30 bg-amber-500/5">
@@ -946,6 +1004,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                             id="dry-run"
                             checked={dryRun}
                             onCheckedChange={(v) => setDryRun(v === true)}
+                            disabled={submitting}
                           />
                           <FieldLabel
                             htmlFor="dry-run"
@@ -988,7 +1047,7 @@ export function Explorer({ routeCohortId }: { routeCohortId?: string | null }) {
                             size="lg"
                             disabled={submitDisabled}
                           >
-                            {pending ? (
+                            {submitting ? (
                               <Spinner data-icon="inline-start" />
                             ) : dryRun ? (
                               <CheckCircle2Icon data-icon="inline-start" />
@@ -1151,9 +1210,11 @@ function ItemList({
   items,
   emptyTitle,
   emptyDescription,
+  disabled = false,
 }: {
   emptyTitle: string;
   emptyDescription: string;
+  disabled?: boolean;
   items: {
     key: string;
     title: string;
@@ -1185,9 +1246,10 @@ function ItemList({
             <li key={item.key} className="min-w-0">
               <button
                 type="button"
+                disabled={disabled}
                 onClick={item.onClick}
                 className={cn(
-                  "flex w-full min-w-0 items-start gap-3 overflow-hidden rounded-xl border px-3.5 py-3 text-left transition-all",
+                  "flex w-full min-w-0 items-start gap-3 overflow-hidden rounded-xl border px-3.5 py-3 text-left transition-all disabled:pointer-events-none disabled:opacity-60",
                   item.active
                     ? "border-foreground/25 bg-foreground/[0.04] ring-2 ring-foreground/10"
                     : "hover:bg-muted/60",
