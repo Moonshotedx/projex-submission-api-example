@@ -59,5 +59,5 @@ curl -sS -X POST "$PROJEX_API_URL/api/v1/milestones/T12M3/submissions?dryRun=tru
 
 ## Prefer typed clients?
 
-See the sibling repo [`projex-submission-sdk-example`](../projex-submission-sdk-example)
+See the sibling repo [`projex-submission-sdk-example`](https://github.com/Moonshotedx/projex-submission-sdk-example)
 which does the same flow with `@pkg-projex/sdk`.
